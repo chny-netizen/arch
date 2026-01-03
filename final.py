@@ -4,169 +4,221 @@ from compas.datastructures import Mesh
 from compas_viewer import Viewer
 
 # ==========================================================
-# 參數配置與選擇區
+# 1. 參數配置區
 # ==========================================================
 
-# 1. 定義所有您想測試的方案
-CONFIGURATIONS = {
-    # 方案 0: 垂直 X 軸切割，平移 0.5 單位
-    0: {
-        "NAME": "X-Cut, Translate 0.5",
-        "NORMAL_VECTOR": [1.0, 0.0, 0.0],
-        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
-        "TRANSLATE": 0.5,
-        "ROTATE_DEG": 0
-    },
+POSSIBLE_STATES = [
+    {"type": "original", "val": 0}, 
+    {"type": "translate", "val": 0.4},
+    {"type": "rotate", "val": 45},
+    {"type": "flip", "val": 0} 
+]
+
+CUT_PLANES = [
+    {"normal": [1.0, 0.0, 0.0], "origin": [0.0, 0.0, 0.0]}, 
+    {"normal": [0.0, 1.0, 0.0], "origin": [0.0, 0.0, 0.0]} 
+]
+
+LAYER_HEIGHT = 4.0      
+TOTAL_WIDTH = 256 * 2.5 
+
+FIXED_COLORS = [
+    (255, 80, 80),   # 紅
+    (50, 200, 80),   # 綠
+    (80, 100, 255),  # 藍
+    (255, 180, 0)    # 橘
+]
+
+# ==========================================================
+# 2. 幾何運算核心
+# ==========================================================
+
+def get_reference_edge(mesh):
+    """自動尋找網格的操作軸"""
+    if mesh is None or len(mesh.vertices) == 0: return [0,0,0], [1,0,0]
+    vertices = mesh.vertices
+    edges = mesh.edges_unique
+    min_z = np.min(vertices[:, 2])
+    bottom_edges = []
+    for edge in edges:
+        p1 = vertices[edge[0]]
+        p2 = vertices[edge[1]]
+        if np.abs(p1[2] - min_z) < 1e-4 and np.abs(p2[2] - min_z) < 1e-4:
+            vec = p2 - p1
+            length = np.linalg.norm(vec)
+            bottom_edges.append((length, p1, vec))
+    if not bottom_edges:
+        return vertices[edges[0][0]], vertices[edges[0][1]] - vertices[edges[0][0]]
+    bottom_edges.sort(key=lambda x: x[0], reverse=True)
+    return bottom_edges[0][1], bottom_edges[0][2]
+
+def apply_edge_action(mesh, action_type, value):
+    """執行變換"""
+    origin, vector = get_reference_edge(mesh)
+    vector_unit = vector / np.linalg.norm(vector)
     
-    # 方案 1: 45 度斜角切割，平移 1.0 單位
-    1: {
-        "NAME": "45-Deg Cut, Translate 1.0",
-        "NORMAL_VECTOR": [1.0, 1.0, 0.0],
-        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
-        "TRANSLATE": 1.0,
-        "ROTATE_DEG": 0
-    },
-
-    # 方案 2: 垂直 Y 軸切割，旋轉 30 度
-    2: {
-        "NAME": "Y-Cut, Rotate 30 Deg",
-        "NORMAL_VECTOR": [0.0, 1.0, 0.0],
-        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
-        "TRANSLATE": 0.0,
-        "ROTATE_DEG": 30
-    },
-
-    # 方案 3: 45 度斜角切割，旋轉 90 度
-    3: {
-        "NAME": "45-Deg Cut, Rotate 90 Deg",
-        "NORMAL_VECTOR": [1.0, 1.0, 0.0],
-        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
-        "TRANSLATE": 0.0,
-        "ROTATE_DEG": 90
-    }
-}
-
-# 2. 選擇您要同時顯示的方案索引列表
-TEST_INDICES = [0, 1, 3] # <--- 這裡設定您想看的方案 (例如：顯示方案 0, 1, 和 3)
-
-# 3. 定義每組方案之間的間隔距離
-# 由於立方體大小為 1.0，我們沿 X 軸間隔 2.5 單位
-OFFSET_STEP = 2.5 
-
-# ----------------------------------------------------------
-# 輔助函式：計算沿切面平移向量 (T)
-# ----------------------------------------------------------
-def calculate_translation_vector(normal_vec, distance):
-    """計算一個與法線垂直的平移向量 (用於沿切面平移)。"""
-    if distance == 0:
-        return [0, 0, 0]
-        
-    normal_vec = np.array(normal_vec)
-    N_unit = normal_vec / np.linalg.norm(normal_vec)
-    
-    # 找到一個與 N 垂直的向量 (使用 np.cross)
-    # 參考向量選擇邏輯：避開與 N 平行的向量
-    if np.abs(N_unit[0]) < 0.5 and np.abs(N_unit[1]) < 0.5:
-        ref_vec = np.array([1, 0, 0])
+    if action_type == "rotate":
+        matrix = trimesh.transformations.rotation_matrix(np.radians(value), direction=vector_unit, point=origin)
+    elif action_type == "flip":
+        matrix = trimesh.transformations.rotation_matrix(np.pi, direction=vector_unit, point=origin)
+    elif action_type == "translate":
+        matrix = trimesh.transformations.translation_matrix(vector_unit * value)
     else:
-        ref_vec = np.array([0, 1, 0])
+        matrix = np.eye(4)
         
-    V_perp = np.cross(N_unit, ref_vec)
+    mesh.apply_transform(matrix)
+    return mesh
+
+def slice_all_meshes(initial_mesh, planes):
+    """遞迴切割"""
+    current_pieces = [initial_mesh]
+    for plane in planes:
+        next_gen = []
+        normal = np.array(plane["normal"])
+        origin = np.array(plane["origin"])
+        for mesh in current_pieces:
+            # slice_plane 需要 mapbox_earcut
+            p_a = mesh.slice_plane(plane_origin=origin, plane_normal=normal, cap=True)
+            p_b = mesh.slice_plane(plane_origin=origin, plane_normal=-normal, cap=True)
+            if isinstance(p_a, trimesh.Trimesh) and len(p_a.faces) > 0: next_gen.append(p_a)
+            if isinstance(p_b, trimesh.Trimesh) and len(p_b.faces) > 0: next_gen.append(p_b)
+        current_pieces = next_gen
+    return current_pieces
+
+# ==========================================================
+# 3. 手寫碰撞檢測 (安全版)
+# ==========================================================
+
+def is_aabb_overlapping(mesh_a, mesh_b):
+    """檢查 Bounding Box 是否重疊"""
+    min_a, max_a = mesh_a.bounds
+    min_b, max_b = mesh_b.bounds
     
-    # 如果 V_perp 仍然是零向量，換另一個參考向量
-    if np.linalg.norm(V_perp) < 1e-6:
-        ref_vec = np.array([0, 0, 1])
-        V_perp = np.cross(N_unit, ref_vec)
-        
-    # 確保 V_perp 是單位向量並乘以距離
-    V_perp_unit = V_perp / np.linalg.norm(V_perp)
-    T = V_perp_unit * distance
-    return T.tolist()
-
-# ----------------------------------------------------------
-# 主執行迴圈與視覺化區
-# ----------------------------------------------------------
-viewer = Viewer()
-total_offset_index = 0
-
-# 迴圈遍歷所有選定的測試方案
-def new_func(PLANE_ORIGIN, cube, plane_normal_positive):
-    result_a = cube.slice_plane(plane_origin=PLANE_ORIGIN, plane_normal=plane_normal_positive, cap=True)
-    return result_a
-
-for test_index in TEST_INDICES:
-    config = CONFIGURATIONS.get(test_index)
-    if not config:
-        print(f"警告：方案 {test_index} 不存在，跳過。")
-        continue
-
-    # 載入參數
-    NORMAL_VECTOR = np.array(config["NORMAL_VECTOR"])
-    PLANE_ORIGIN = config["PLANE_ORIGIN"]
-    TRANSLATE_DISTANCE = config["TRANSLATE"]
-    ROTATION_DEGREES = config["ROTATE_DEG"]
-
-    # 1. 建立並固定網格法線
-    # 必須在迴圈內重新建立 cube，以確保每次操作都是在原始立方體上進行
-    cube = trimesh.creation.box(extents=[1.0, 1.0, 1.0]) 
-    cube.fix_normals()
-
-    # 定義法線
-    plane_normal_positive = NORMAL_VECTOR
-    plane_normal_negative = [-x for x in NORMAL_VECTOR] 
-
-    # 2. 執行雙重切割
-    result_a = new_func(PLANE_ORIGIN, cube, plane_normal_positive)
-    result_b = cube.slice_plane(plane_origin=PLANE_ORIGIN, plane_normal=plane_normal_negative, cap=True)
-
-    # 3. 處理、轉換並應用方案內轉換 (平移/旋轉)
-    mesh_list = []
+    if max_a[0] < min_b[0] or min_a[0] > max_b[0]: return False
+    if max_a[1] < min_b[1] or min_a[1] > max_b[1]: return False
+    if max_a[2] < min_b[2] or min_a[2] > max_b[2]: return False
     
-    # 處理 Part A
-    if isinstance(result_a, trimesh.Trimesh) and len(result_a.faces) > 0:
-        mesh_a = result_a
-        mesh_list.append((mesh_a, "Part A"))
+    return True
 
-    # 處理 Part B (應用方案內轉換)
-    if isinstance(result_b, trimesh.Trimesh) and len(result_b.faces) > 0:
-        mesh_b = result_b
-        
-        # 應用旋轉
-        if ROTATION_DEGREES != 0:
-            rotation_angle = np.radians(ROTATION_DEGREES)
-            R_matrix = trimesh.transformations.rotation_matrix(
-                angle=rotation_angle, direction=NORMAL_VECTOR, point=PLANE_ORIGIN
-            )
-            mesh_b.apply_transform(R_matrix)
-        
-        # 應用平移
-        if TRANSLATE_DISTANCE != 0:
-            translation_vector = calculate_translation_vector(NORMAL_VECTOR, TRANSLATE_DISTANCE)
-            T_matrix = trimesh.transformations.translation_matrix(translation_vector)
-            mesh_b.apply_transform(T_matrix)
+def check_collision(target_mesh, other_meshes):
+    """幾何碰撞檢測"""
+    if not other_meshes: return False
+
+    test_mesh = target_mesh.copy()
+    center = test_mesh.centroid
+    test_mesh.vertices -= center
+    test_mesh.apply_scale(0.99) 
+    test_mesh.vertices += center
+    
+    test_points = test_mesh.vertices
+
+    for obstacle in other_meshes:
+        if not is_aabb_overlapping(test_mesh, obstacle):
+            continue
+
+        try:
+            # 雙向檢查
+            if np.any(obstacle.contains(test_points)): return True 
+            if np.any(test_mesh.contains(obstacle.vertices)): return True
+        except Exception:
+            return True
             
-        mesh_list.append((mesh_b, "Part B"))
+    return False
 
-    # 4. 應用並排顯示的【整體偏移】
-    # 沿 X 軸移動，使多組結果分開
-    x_offset = total_offset_index * OFFSET_STEP 
+# ==========================================================
+# 4. 樹狀圖生成器 (支援顯示灰色碰撞體)
+# ==========================================================
+
+def build_tree_recursive(current_meshes, depth, x_center, available_width, viewer, is_failed=False):
+    """
+    is_failed: 如果為 True，代表這一組模型發生了碰撞，將被畫成灰色並停止生長。
+    """
     
-    if mesh_list:
-        print(f"載入方案 {test_index}: {config['NAME']}，偏移量 X={x_offset}")
-
-    for i, (mesh, part_name) in enumerate(mesh_list):
-        # 應用整體平移矩陣
-        OFFSET_MATRIX = trimesh.transformations.translation_matrix([x_offset, 0, 0])
-        mesh.apply_transform(OFFSET_MATRIX)
+    y_pos = -depth * LAYER_HEIGHT
+    is_final_layer = (depth >= len(current_meshes))
+    
+    # --- A. 顯示模型 ---
+    for i, mesh in enumerate(current_meshes):
+        display_mesh = mesh.copy()
+        matrix_pos = trimesh.transformations.translation_matrix([x_center, y_pos, 0])
+        display_mesh.apply_transform(matrix_pos)
+        compas_mesh = Mesh.from_vertices_and_faces(display_mesh.vertices, display_mesh.faces)
         
-        # 轉換為 compas Mesh 格式
-        compas_mesh = Mesh.from_vertices_and_faces(mesh.vertices, mesh.faces)
+        # 顏色邏輯修改：失敗者全灰
+        if is_failed:
+            c = (150, 150, 150) # 灰色 (Gray)
+            opacity_val = 0.5   # 稍微透明一點，像幽靈一樣
+            show_edges_val = True # 顯示邊框讓人看清楚怎麼撞的
+        else:
+            c = FIXED_COLORS[i % len(FIXED_COLORS)]
+            if is_final_layer:
+                opacity_val = 1.0; show_edges_val = True
+            else:
+                if i == depth: opacity_val = 1.0; show_edges_val = True
+                else: opacity_val = 0.3; show_edges_val = False
         
-        # 加入 Viewer (使用不同的顏色)
-        color = (255, 80, 80) if part_name == "Part A" else (80, 255, 80)
-        viewer.scene.add(compas_mesh, name=f"Set{test_index}_{part_name}", facecolor=color, opacity=0.8)
+        unique_name = f"L{depth}_X{int(x_center*10)}_{i}_{'FAIL' if is_failed else 'OK'}"
+        viewer.scene.add(compas_mesh, name=unique_name, facecolor=c, opacity=opacity_val, show_edges=show_edges_val)
 
-    total_offset_index += 1
+    # --- B. 終止條件 ---
+    # 如果已經到底層，或者「已經失敗(碰撞)」，就不再生下一代了
+    if is_final_layer or is_failed:
+        return
 
-# 顯示所有結果
-viewer.show()
+    # --- C. 產生下一層 ---
+    num_branches = len(POSSIBLE_STATES)
+    sub_width = available_width / num_branches
+    
+    for i, state in enumerate(POSSIBLE_STATES):
+        next_meshes = [m.copy() for m in current_meshes]
+        
+        # 應用變形
+        target_index = depth
+        if state["type"] != "original":
+            try:
+                next_meshes[target_index] = apply_edge_action(
+                    next_meshes[target_index], state["type"], state["val"]
+                )
+            except: pass 
+        
+        # 碰撞檢測
+        moving_part = next_meshes[target_index]
+        other_parts = [m for idx, m in enumerate(next_meshes) if idx != target_index]
+        
+        # 這裡改了！如果撞到，is_collision_happened 為 True
+        is_collision_happened = check_collision(moving_part, other_parts)
+
+        # 計算座標
+        start_x = x_center - (available_width / 2)
+        child_x = start_x + (i * sub_width) + (sub_width / 2)
+        
+        # 繼續遞迴，但把「是否碰撞」的狀態傳下去
+        # 如果 is_collision_happened 是 True，下一層就會被畫成灰色，然後停止
+        build_tree_recursive(next_meshes, depth + 1, child_x, sub_width, viewer, is_failed=is_collision_happened)
+
+# ==========================================================
+# 5. 主程式
+# ==========================================================
+
+if __name__ == "__main__":
+    viewer = Viewer()
+
+    print("=== 程式開始 ===")
+    
+    cube = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
+    cube.fix_normals()
+    
+    try:
+        base_parts = slice_all_meshes(cube, CUT_PLANES)
+        print(f"-> 切割完成，產生 {len(base_parts)} 塊量體。")
+    except ValueError as e:
+        print("\n!!! 錯誤: 請輸入 pip install mapbox_earcut !!!\n")
+        raise e
+
+    print("-> 開始生成樹狀圖...")
+    print("   (灰色模型代表發生碰撞的無效方案)")
+    
+    build_tree_recursive(base_parts, 0, 0, TOTAL_WIDTH, viewer)
+
+    print("=== 生成完畢 ===")
+    viewer.show()

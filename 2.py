@@ -2,155 +2,171 @@ import trimesh
 import numpy as np
 from compas.datastructures import Mesh
 from compas_viewer import Viewer
-import time
 
 # ==========================================================
 # 參數配置與選擇區
 # ==========================================================
 
+# 1. 定義所有您想測試的方案
 CONFIGURATIONS = {
-    # 方案 0: X 軸切 5 刀 (產生 6 塊)，像切吐司一樣
+    # 方案 0: 垂直 X 軸切割，平移 0.5 單位
     0: {
-        "NAME": "X-Axis Multi-Cut (5 cuts)",
+        "NAME": "X-Cut, Translate 0.5",
         "NORMAL_VECTOR": [1.0, 0.0, 0.0],
-        "START_POINT": [-0.4, 0.0, 0.0], # 切割的起始點 (方塊中心是 0,0,0，所以從 -0.4 開始切)
-        "CUT_INTERVAL": 0.16,            # 每一刀的間隔距離
-        "NUM_CUTS": 5,                   # 總共切幾刀
-        "EXPLODE_DIST": 0.1,             # 展示時，每一片拉開的距離 (爆炸圖效果)
+        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
+        "TRANSLATE": 0.5,
         "ROTATE_DEG": 0
     },
     
-    # 方案 1: 斜角切 3 刀，並且旋轉每一片
+    # 方案 1: 45 度斜角切割，平移 1.0 單位
     1: {
-        "NAME": "45-Deg Multi-Cut (3 cuts)",
+        "NAME": "45-Deg Cut, Translate 1.0",
         "NORMAL_VECTOR": [1.0, 1.0, 0.0],
-        "START_POINT": [-0.2, -0.2, 0.0],
-        "CUT_INTERVAL": 0.2,
-        "NUM_CUTS": 3,
-        "EXPLODE_DIST": 0.3,
-        "ROTATE_DEG": 15                 # 每一片都比上一片多轉 15 度
+        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
+        "TRANSLATE": 1.0,
+        "ROTATE_DEG": 0
+    },
+
+    # 方案 2: 垂直 Y 軸切割，旋轉 30 度
+    2: {
+        "NAME": "Y-Cut, Rotate 30 Deg",
+        "NORMAL_VECTOR": [0.0, 1.0, 0.0],
+        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
+        "TRANSLATE": 0.0,
+        "ROTATE_DEG": 30
+    },
+
+    # 方案 3: 45 度斜角切割，旋轉 90 度
+    3: {
+        "NAME": "45-Deg Cut, Rotate 90 Deg",
+        "NORMAL_VECTOR": [1.0, 1.0, 0.0],
+        "PLANE_ORIGIN": [0.0, 0.0, 0.0],
+        "TRANSLATE": 0.0,
+        "ROTATE_DEG": 90
     }
 }
 
-TEST_INDICES = [0, 1] 
+# 2. 選擇您要同時顯示的方案索引列表
+TEST_INDICES = [0, 1, 3] # <--- 這裡設定您想看的方案 (例如：顯示方案 0, 1, 和 3)
+
+# 3. 定義每組方案之間的間隔距離
+# 由於立方體大小為 1.0，我們沿 X 軸間隔 2.5 單位
 OFFSET_STEP = 2.5 
 
 # ----------------------------------------------------------
-# 核心邏輯：執行 N 次切割
+# 輔助函式：計算沿切面平移向量 (T)
 # ----------------------------------------------------------
-def slice_mesh_n_times(mesh, normal, start_origin, interval, num_cuts):
-    """
-    對網格進行多次切割，返回所有碎片的清單。
-    邏輯：切下一片 -> 存起來 -> 剩下的部分繼續切
-    """
-    parts = []
-    current_mesh = mesh
-    
-    # 確保法線是單位向量
-    normal = np.array(normal)
-    normal = normal / np.linalg.norm(normal)
-    
-    current_origin = np.array(start_origin)
-    
-    for i in range(num_cuts):
-        # 如果剩下的網格已經空了，就停止
-        if current_mesh is None or len(current_mesh.faces) == 0:
-            break
-            
-        # 執行切割 (保留正向和負向)
-        # 負向(Negative)通常是「刀子後面」那塊，我們把它當作切下來的薄片存起來
-        # 正向(Positive)通常是「刀子前面」那塊，我們拿來下一輪繼續切
-        # 注意：這邊的 Positive/Negative 取決於你的法線方向，如果切反了可以互換
-        slice_result_keep = current_mesh.slice_plane(plane_origin=current_origin, plane_normal=-normal, cap=True)
-        slice_result_remain = current_mesh.slice_plane(plane_origin=current_origin, plane_normal=normal, cap=True)
+def calculate_translation_vector(normal_vec, distance):
+    """計算一個與法線垂直的平移向量 (用於沿切面平移)。"""
+    if distance == 0:
+        return [0, 0, 0]
         
-        # 1. 處理切下來的那一片 (存入清單)
-        if isinstance(slice_result_keep, trimesh.Trimesh) and len(slice_result_keep.faces) > 0:
-            parts.append(slice_result_keep)
+    normal_vec = np.array(normal_vec)
+    N_unit = normal_vec / np.linalg.norm(normal_vec)
+    
+    # 找到一個與 N 垂直的向量 (使用 np.cross)
+    # 參考向量選擇邏輯：避開與 N 平行的向量
+    if np.abs(N_unit[0]) < 0.5 and np.abs(N_unit[1]) < 0.5:
+        ref_vec = np.array([1, 0, 0])
+    else:
+        ref_vec = np.array([0, 1, 0])
         
-        # 2. 更新「剩下的部分」，準備下一輪切割
-        if isinstance(slice_result_remain, trimesh.Trimesh) and len(slice_result_remain.faces) > 0:
-            current_mesh = slice_result_remain
-            # 更新下一刀的切割原點 (往法線方向移動 interval 距離)
-            current_origin = current_origin + (normal * interval)
-        else:
-            current_mesh = None # 切完了
-            
-    # 迴圈結束後，別忘了把最後剩下的那一塊也加進去
-    if current_mesh is not None and len(current_mesh.faces) > 0:
-        parts.append(current_mesh)
+    V_perp = np.cross(N_unit, ref_vec)
+    
+    # 如果 V_perp 仍然是零向量，換另一個參考向量
+    if np.linalg.norm(V_perp) < 1e-6:
+        ref_vec = np.array([0, 0, 1])
+        V_perp = np.cross(N_unit, ref_vec)
         
-    return parts
+    # 確保 V_perp 是單位向量並乘以距離
+    V_perp_unit = V_perp / np.linalg.norm(V_perp)
+    T = V_perp_unit * distance
+    return T.tolist()
 
 # ----------------------------------------------------------
-# 主執行迴圈
+# 主執行迴圈與視覺化區
 # ----------------------------------------------------------
 viewer = Viewer()
 total_offset_index = 0
 
+# 迴圈遍歷所有選定的測試方案
+def new_func(PLANE_ORIGIN, cube, plane_normal_positive):
+    result_a = cube.slice_plane(plane_origin=PLANE_ORIGIN, plane_normal=plane_normal_positive, cap=True)
+    return result_a
+
 for test_index in TEST_INDICES:
     config = CONFIGURATIONS.get(test_index)
-    if not config: continue
+    if not config:
+        print(f"警告：方案 {test_index} 不存在，跳過。")
+        continue
 
-    print(f"正在處理方案: {config['NAME']}...")
+    # 載入參數
+    NORMAL_VECTOR = np.array(config["NORMAL_VECTOR"])
+    PLANE_ORIGIN = config["PLANE_ORIGIN"]
+    TRANSLATE_DISTANCE = config["TRANSLATE"]
+    ROTATION_DEGREES = config["ROTATE_DEG"]
 
-    # 1. 建立原始立方體
+    # 1. 建立並固定網格法線
+    # 必須在迴圈內重新建立 cube，以確保每次操作都是在原始立方體上進行
     cube = trimesh.creation.box(extents=[1.0, 1.0, 1.0]) 
     cube.fix_normals()
 
-    # 2. 呼叫多重切割函式
-    sliced_parts = slice_mesh_n_times(
-        mesh=cube,
-        normal=config["NORMAL_VECTOR"],
-        start_origin=config["START_POINT"],
-        interval=config["CUT_INTERVAL"],
-        num_cuts=config["NUM_CUTS"]
-    )
+    # 定義法線
+    plane_normal_positive = NORMAL_VECTOR
+    plane_normal_negative = [-x for x in NORMAL_VECTOR] 
 
-    # 3. 處理每一塊碎片 (移動、旋轉、顯示)
-    # 為了讓結果分開顯示，我們使用 total_offset_index 計算整體 X 軸偏移
-    base_x_offset = total_offset_index * OFFSET_STEP
+    # 2. 執行雙重切割
+    result_a = new_func(PLANE_ORIGIN, cube, plane_normal_positive)
+    result_b = cube.slice_plane(plane_origin=PLANE_ORIGIN, plane_normal=plane_normal_negative, cap=True)
+
+    # 3. 處理、轉換並應用方案內轉換 (平移/旋轉)
+    mesh_list = []
     
-    # 產生一組漸層顏色 (從紅到藍)
-    for i, part in enumerate(sliced_parts):
-        
-        # --- 個別控制區 ---
-        # 這裡示範如何讓每一塊「獨立移動」
-        # 我們讓每一塊沿著法線方向炸開 (Explode)
-        
-        explode_vec = np.array(config["NORMAL_VECTOR"])
-        explode_vec = explode_vec / np.linalg.norm(explode_vec)
-        
-        # 計算這一塊要移動多少 (索引 i 越大，移動越遠)
-        move_dist = i * config["EXPLODE_DIST"]
-        translation = explode_vec * move_dist
-        
-        # 應用「爆炸」移動
-        matrix_explode = trimesh.transformations.translation_matrix(translation)
-        part.apply_transform(matrix_explode)
-        
-        # 應用「個別旋轉」(如果有的話)
-        if config["ROTATE_DEG"] != 0:
-            angle = np.radians(config["ROTATE_DEG"] * i) # 每一塊轉的角度都增加
-            # 繞著自己的中心轉，還是繞著原點轉？這裡是繞原點
-            matrix_rot = trimesh.transformations.rotation_matrix(angle, [0,0,1])
-            part.apply_transform(matrix_rot)
+    # 處理 Part A
+    if isinstance(result_a, trimesh.Trimesh) and len(result_a.faces) > 0:
+        mesh_a = result_a
+        mesh_list.append((mesh_a, "Part A"))
 
-        # --- 整體顯示偏移 ---
-        matrix_offset = trimesh.transformations.translation_matrix([base_x_offset, 0, 0])
-        part.apply_transform(matrix_offset)
+    # 處理 Part B (應用方案內轉換)
+    if isinstance(result_b, trimesh.Trimesh) and len(result_b.faces) > 0:
+        mesh_b = result_b
         
-        # --- 轉為 Compas Mesh 並加入 Viewer ---
-        compas_mesh = Mesh.from_vertices_and_faces(part.vertices, part.faces)
+        # 應用旋轉
+        if ROTATION_DEGREES != 0:
+            rotation_angle = np.radians(ROTATION_DEGREES)
+            R_matrix = trimesh.transformations.rotation_matrix(
+                angle=rotation_angle, direction=NORMAL_VECTOR, point=PLANE_ORIGIN
+            )
+            mesh_b.apply_transform(R_matrix)
         
-        # 根據索引給不同的顏色
-        if i % 2 == 0:
-            color = (255, 100, 100) # 紅色系
-        else:
-            color = (100, 100, 255) # 藍色系
+        # 應用平移
+        if TRANSLATE_DISTANCE != 0:
+            translation_vector = calculate_translation_vector(NORMAL_VECTOR, TRANSLATE_DISTANCE)
+            T_matrix = trimesh.transformations.translation_matrix(translation_vector)
+            mesh_b.apply_transform(T_matrix)
             
-        viewer.scene.add(compas_mesh, name=f"Set{test_index}_Part{i}", facecolor=color)
+        mesh_list.append((mesh_b, "Part B"))
+
+    # 4. 應用並排顯示的【整體偏移】
+    # 沿 X 軸移動，使多組結果分開
+    x_offset = total_offset_index * OFFSET_STEP 
+    
+    if mesh_list:
+        print(f"載入方案 {test_index}: {config['NAME']}，偏移量 X={x_offset}")
+
+    for i, (mesh, part_name) in enumerate(mesh_list):
+        # 應用整體平移矩陣
+        OFFSET_MATRIX = trimesh.transformations.translation_matrix([x_offset, 0, 0])
+        mesh.apply_transform(OFFSET_MATRIX)
+        
+        # 轉換為 compas Mesh 格式
+        compas_mesh = Mesh.from_vertices_and_faces(mesh.vertices, mesh.faces)
+        
+        # 加入 Viewer (使用不同的顏色)
+        color = (255, 80, 80) if part_name == "Part A" else (80, 255, 80)
+        viewer.scene.add(compas_mesh, name=f"Set{test_index}_{part_name}", facecolor=color, opacity=0.8)
 
     total_offset_index += 1
 
+# 顯示所有結果
 viewer.show()
