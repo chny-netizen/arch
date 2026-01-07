@@ -313,3 +313,202 @@ cap=True 參數：自動補上切割面，確保切完後的零件依然是密�
 ### 4. 參數設定
 * **目前狀況**：切割平面 (`CUT_PLANES`) 與變形規則 (`POSSIBLE_STATES`) 直接寫死在程式碼中。
 * **改善建議**：將參數抽離至 **`config.json`** 或 YAML 檔，無需修改程式碼即可快速測試不同的生長邏輯與切割方案。
+
+# AI Process
+### Prompt 1：  
+哪一項ai最適合用於寫程式 我想要用python寫一個程式 跑圖形 我想達成rhino中建模的效果:將一個立方體上隨意畫一條線 分割那個立方體 可以如何進行 
+
+### Prompt 2：
+我目前進行的成果如下，但跑出的圖形是完整的立方體，並沒有出現切割後的狀態，我可以如何繼續，請幫我檢驗程式碼，目前沒有安裝外掛，如果需要使用外掛，請給我詳細的指引:  
+     
+    from compas.datastructures import Mesh
+    from compas.geometry import Plane
+    from compas_viewer import Viewer
+    
+    # ----------------------------------------------------------
+    # 1. 手動建立一顆立方體（不依賴 Box / Frame）
+    # ----------------------------------------------------------
+    vertices = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [1, 1, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [1, 0, 1],
+        [1, 1, 1],
+        [0, 1, 1],
+    ]
+    
+    faces = [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [0, 1, 5, 4],
+        [1, 2, 6, 5],
+        [2, 3, 7, 6],
+        [3, 0, 4, 7]
+    ]
+    
+    mesh = Mesh.from_vertices_and_faces(vertices, faces)
+    
+    # ----------------------------------------------------------
+    # 2. 建立你畫的切割線（兩個點）
+    # ----------------------------------------------------------
+    p1 = [0.2, -1, 0.3]
+    p2 = [0.2,  1, 0.7]
+    
+    # 把線轉成切割平面
+    plane_origin = [(p1[i] + p2[i]) / 2 for i in range(3)]
+    plane_normal = [p2[i] - p1[i] for i in range(3)]
+    plane = Plane(plane_origin, plane_normal)
+    
+    # ----------------------------------------------------------
+    # 3. 分類 mesh 頂點（平面前 / 平面後）
+    # ----------------------------------------------------------
+    side_pos = []
+    side_neg = []
+    
+    for v in mesh.vertices():
+        xyz = mesh.vertex_coordinates(v)
+        d = plane.distance_to_point(xyz)
+        if d >= 0:
+            side_pos.append(v)
+        else:
+            side_neg.append(v)
+    
+    # ----------------------------------------------------------
+    # 4. 根據點分類，生成兩個子 mesh
+    # ----------------------------------------------------------
+    faces_pos = []
+    faces_neg = []
+    
+    for f in mesh.faces():
+        verts = mesh.face_vertices(f)
+        if all(v in side_pos for v in verts):
+            faces_pos.append(verts)
+        elif all(v in side_neg for v in verts):
+            faces_neg.append(verts)
+    
+    mesh_pos = Mesh.from_vertices_and_faces(
+        [mesh.vertex_coordinates(v) for v in side_pos], faces_pos)
+    
+    mesh_neg = Mesh.from_vertices_and_faces(
+        [mesh.vertex_coordinates(v) for v in side_neg], faces_neg)
+    
+    # ----------------------------------------------------------
+    # 5. 顯示結果
+    # ----------------------------------------------------------
+    viewer = Viewer()
+    viewer.scene.add(mesh_pos, name="Upper", facecolor=(255, 80, 80))
+    viewer.scene.add(mesh_neg, name="Lower", facecolor=(80, 120, 255))
+    viewer.show()
+
+### Prompt 3：
+
+    Error: compas_cgal is not installed or failed to import.
+    
+    Please follow the installation guide.
+  
+### Prompt 4：  
+跑出error了但我的conda有安裝成功 只是下次如果要指示我進行相關步驟 請清楚地寫出我應該貼在哪個程式中 另外我不太清楚終端機、conda等等有何差異麻煩說明  
+
+    try running `pip install mapbox-earcut manifold3d`or `triangle`, `mapbox_earcut`, then explicitly pass:
+    
+    `triangulate_polygon(*args, engine="triangle")`
+    
+    to use the non-FSF-approved-license triangle engine
+    
+    Traceback (most recent call last):
+    
+      File "c:\Users\DCCG\Practices\1210.py", line 20, in <module>
+    
+        mesh_a, mesh_b = cube.slice_plane(
+    
+      File "C:\Miniconda3\envs\DCCG\lib\site-packages\trimesh\base.py", line 2357, in slice_plane
+    
+        new_mesh = intersections.slice_mesh_plane(
+    
+      File "C:\Miniconda3\envs\DCCG\lib\site-packages\trimesh\intersections.py", line 786, in slice_mesh_plane
+    
+        vn, fn = triangulate_polygon(p, engine=engine, force_vertices=True)
+    
+      File "C:\Miniconda3\envs\DCCG\lib\site-packages\trimesh\creation.py", line 675, in triangulate_polygon
+    
+        raise ValueError("No available triangulation engine!")
+    
+    ValueError: No available triangulation engine!
+    
+    (DCCG) PS C:\Users\DCCG> pip install mapbox-earcut manifold3d
+    
+    Collecting mapbox-earcut
+    
+      Downloading mapbox_earcut-2.0.0-cp39-cp39-win_amd64.whl.metadata (2.5 kB)
+    
+    Collecting manifold3d
+
+### Prompt 5：  
+
+我希望最終成果可以利用compas視覺化，另外還是有錯誤ㄟ:  
+
+    line 20, in <module>
+    
+        mesh_a, mesh_b = cube.slice_plane(
+    
+    TypeError: cannot unpack non-iterable Trimesh object
+
+### Prompt 6：  
+
+    line 62, in <module>
+    
+        viewer.scene.update()
+    
+    AttributeError: 'ViewerScene' object has no attribute 'update'
+
+### Prompt 7：  
+
+啊我希望切完之後兩個部分都保留 現在是只保留一個嗎  
+
+### Prompt 8：  
+
+只看到part Aㄟ part B不見了
+
+### Prompt 9：  
+
+還是沒出現part B 切完之後不要移動 幫我把兩塊分別定義不同顏色就好
+
+### Prompt 10：  
+
+現在正常了 你好棒 現在我希望其中一塊可以沿切面的任意方向平移 先假設綠色那塊在移動好了 
+
+### Prompt 11：  
+
+好棒 如果我改變切面的方向或位置 這個程式還能運作嗎
+
+### Prompt 12：   
+
+有點複雜 但總之就是平移的方向要平行切面方向 或垂直切面的法向量對吧 可以幫我把完整程式碼寫出來嗎
+
+### Prompt 13：   
+
+    line 23
+    
+        [Image of two perpendicular vectors N and T on a 3D plane]
+    
+               ^
+    
+    SyntaxError: invalid syntax
+
+### Prompt 14：   
+
+好棒喔 阿如果我要旋轉咧 以切面的法向量為軸旋轉
+
+### Prompt 15：   
+
+那我想要再複雜一點 我想用這個程式碼同時測試多種方案 比如說切這個線跟切那個線... 然後兩個方案各衍伸平移一單位、兩單位... 再各衍伸旋轉30度、60度、90度...
+
+### Prompt 16：   
+
+那如果我希望螢幕上一次顯示三組咧 可能每個結果隔一段距離顯示這樣
+
+
+
+
